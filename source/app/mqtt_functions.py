@@ -35,6 +35,7 @@ class BrokerInfo:
     def create_client(self) -> mqtt.Client:
         return create_client(self)
 
+
 def create_client(broker: BrokerInfo) -> mqtt.Client:
     client = mqtt.Client(client_id=broker.client_id, clean_session=True)
     if broker.username or broker.password: # TODO is this valid to have pw without username or vice versa?

@@ -2,13 +2,15 @@ from app.protobuf_files import sparkplug_pb2
 from app import config, mqtt_functions
 from google.protobuf.json_format import MessageToJson, MessageToDict, Parse, ParseDict, ParseError
 from google.protobuf.message import DecodeError, EncodeError
-from typing import List
+from typing import List, Callable, Optional
 from enum import Enum
 import logging
 from app import helpers
 from collections import deque
 import time
 import uuid
+import os
+import json
 
 
 class SparkplugDataTypes(Enum):
@@ -112,6 +114,8 @@ class SparkplugMetric:
         alias: int = None,
         disable_alias: bool = False,
         rbe_ignore: bool = False,
+        on_write = None,
+        on_read = None
     ) -> None:
         """
         read function signature: read_function(prev_value)
@@ -119,13 +123,18 @@ class SparkplugMetric:
 
         write function signature: write_function(value) -> bool
         The bool return value of write indicates success / failure
+
+        on_read callback signature: on_read(metric_obj=self, current_value=value, success=success)
+        on_write callback signature: on_write(metric_obj=self, value_written=value, success=success)
         """
         self.__instance_count += 1
         if alias is None:
             alias = self.__instance_count
 
         self.__read_fn = read_function
+        self.__on_read = on_read if on_read and callable(on_read) else None
         self.__write_fn = write_function
+        self.__on_write = on_write if on_write and callable(on_write) else None
         
         self.__alias = alias
         self.__disable_alias = disable_alias
@@ -174,6 +183,10 @@ class SparkplugMetric:
     @property
     def current_value(self):
         return self.__current_value
+
+    @property
+    def disable_alias(self) -> bool:
+        return self.__disable_alias
     
     @property
     def rbe_ignore(self) -> bool:
@@ -193,23 +206,55 @@ class SparkplugMetric:
         return props_formatted
     
     def read(self) -> bool:
+        success = True
         try:
             prev_value = self.__current_value
             self.__current_value = self.__read_fn(prev_value)
             self.__read_millis = helpers.millis()
             self.__prev_value = prev_value
         except Exception as err:
-            return False
-        return True
+            success = False
+
+        if self.__on_read:
+            self.__on_read(metric_obj=self, current_value=self.__current_value, success=success)
+        return success
 
     def write(self, value) -> bool:
+        if not self.writable:
+            return False
+        success = True
         try:
-            if self.__write_fn is not None and self.__write_fn(self.__coerce_fn(value)):
-                # self.read()
-                return True
-            return False
+            value = self.__coerce_fn(value)
+            success = self.__write_fn(value)
         except Exception:
-            return False
+            success = False
+        if self.__on_write:
+            self.__on_write(metric_obj=self, value_written=value, success=success)
+        return success
+
+    @staticmethod
+    def int_to_uint(value, bit_size=32) -> int:
+        if not isinstance(value, int):
+            return None
+        # Calculate the max value for the given bit size
+        max_uint = 2 ** bit_size
+        # Convert the int to uint
+        if value < 0:
+            return max_uint + value
+        return value
+    
+    def __set_value_for_payload(self, metric_dict: dict):
+        if self.__current_value is None:
+            metric_dict['is_null'] = True
+            return
+
+        value = self.__current_value
+        if self.__value_key == 'long_value':
+            value = self.int_to_uint(self.__current_value, bit_size=64)
+        elif self.__value_key == 'int_value':
+            value = self.int_to_uint(self.__current_value, bit_size=32)
+        metric_dict[self.__value_key] = value
+        
 
     def as_birth_metric(self) -> dict:
         metric = {
@@ -220,10 +265,8 @@ class SparkplugMetric:
         }
         if not self.__disable_alias:
             metric['alias'] = self.__alias
-        if self.__current_value is None:
-            metric['is_null'] = True
-        else:
-            metric[self.__value_key] = self.__current_value
+        
+        self.__set_value_for_payload(metric)
         return metric
 
     def as_rbe_metric(self) -> dict:
@@ -237,10 +280,7 @@ class SparkplugMetric:
         else:
             metric['alias'] = self.__alias
 
-        if self.__current_value is None:
-            metric['is_null'] = True
-        else:
-            metric[self.__value_key] = self.__current_value
+        self.__set_value_for_payload(metric)
         return metric
 
 
@@ -254,11 +294,12 @@ class SparkplugMemoryTag(SparkplugMetric):
         alias: int = None,
         disable_alias: bool = False,
         rbe_ignore: bool = False,
-        persistent: bool = False
+        persistence_file: Optional[str] = None
     ) -> None:
         self.__mem_value = initial_value
-        self.__persistent = persistent
-        super().__init__(
+        self.__persistence_file = persistence_file
+
+        init_args = dict(
             name=name,
             datatype=datatype,
             read_function=self.__mem_reader,
@@ -267,18 +308,78 @@ class SparkplugMemoryTag(SparkplugMetric):
             disable_alias=disable_alias,
             rbe_ignore=rbe_ignore
         )
-        if persistent:  # Get value from storage
-            raise NotImplementedError
+        
+        if persistence_file:  # Get value from storage
+            self.__create_persistence_file()
+            persistence_data = self.__read_persistence_file()
+            if persistence_data is None:
+                logging.warning(f'Persitence data could not be loaded "{persistence_file}"')
+            elif name in persistence_data.keys():
+                if 'current_value' in persistence_data[name].keys():
+                    self.__mem_value = persistence_data[name]['current_value']
+                for key in init_args.keys():
+                    if key not in persistence_data[name].keys():
+                        continue
+                    init_args[key] = persistence_data[name][key]
+        
+        super().__init__(**init_args)
+
         self.read()
 
+    def __create_persistence_file(self):
+        if not os.path.isfile(self.__persistence_file):
+            directory_path = os.path.dirname(self.__persistence_file)
+            os.makedirs(directory_path, exist_ok=True)
+            with open(self.__persistence_file, 'w', newline='') as file:
+                json.dump({}, file)
+            logging.info(f'Created SparkplugMemoryTag persistence file "{self.__persistence_file}"')
+
+    def __read_persistence_file(self) -> Optional[dict]:
+        if not self.persistent:
+            return None
+        try:
+            with open(self.__persistence_file, 'r') as file:
+                return json.load(file)
+        except json.JSONDecodeError as err:
+            logging.error(f'Could not load persistence file for Memory Tag "{self.name}" (invalid json)')
+            return None
+
+    def save_to_disk(self):
+        if not self.persistent:
+            logging.warning(f'Cannot save tag "{self.name}", no persistence file configured!')
+            return
+
+        existing_file_data = self.__read_persistence_file()
+        if existing_file_data is None:
+            self.__create_persistence_file()
+            existing_file_data = {}
+        
+        existing_file_data[self.name] = self.get_config()
+        with open(self.__persistence_file, 'w', newline='') as file:
+            json.dump(existing_file_data, file, indent=4)
+
     def __mem_reader(self, prev_value):
-        if not self.__persistent:
-            return self.__mem_value
+        return self.__mem_value
 
     def __mem_writer(self, value) -> bool:
-        if not self.__persistent:
-            self.__mem_value = value
-            return True
+        self.__mem_value = value
+        return True
+
+    @property
+    def persistent(self) -> bool:
+        return self.__persistence_file is not None
+
+    def get_config(self) -> dict:
+        return {
+            'name': self.name,
+            'alias': self.alias,
+            'writable': self.writable,
+            'datatype_value': self.sparkplug_datatype.value,
+            'disable_alias': self.disable_alias,
+            'rbe_ignore': self.rbe_ignore,
+            'persistent': self.persistent,
+            'current_value': self.current_value
+        }
 
 
 class SparkplugEdgeNodeTopics:
@@ -322,9 +423,16 @@ class SparkplugEdgeNode:
         group_id: str,
         edge_node_id: str,
         brokers: List[mqtt_functions.BrokerInfo],
-        metrics: List[SparkplugMetric] = None,
-        host_application_id: str = None,
-        scan_rate: int = None
+        metrics: Optional[List[SparkplugMetric]] = None,
+        host_application_id: Optional[str] = None,
+        scan_rate: Optional[int] = None,
+        config_save_rate: Optional[int] = None,
+        on_set_client: Optional[Callable[['SparkplugEdgeNode', mqtt_functions.mqtt.Client], None]] = None,
+        on_mqtt_connect: Optional[Callable[['SparkplugEdgeNode', mqtt_functions.mqtt.Client], None]] = None,
+        on_mqtt_publish: Optional[Callable[['SparkplugEdgeNode', mqtt_functions.mqtt.Client], None]] = None,
+        on_mqtt_message: Optional[Callable[['SparkplugEdgeNode', mqtt_functions.mqtt.Client], None]] = None,
+        on_mqtt_disconnect: Optional[Callable[['SparkplugEdgeNode', mqtt_functions.mqtt.Client], None]] = None,
+        config_filepath: str = None
         ) -> None:
 
         metrics = [] if metrics is None else metrics
@@ -337,7 +445,21 @@ class SparkplugEdgeNode:
         self.__metrics = metrics
         self.__running = False
 
-        scan_rate = 1000 if not scan_rate or scan_rate > 3600000 or scan_rate < 500 else scan_rate
+        scan_rate = 1000 if not scan_rate or scan_rate > 3_600_000 or scan_rate < 500 else scan_rate
+        config_save_rate = 600_000 if not config_save_rate or config_save_rate > 36_000_000 or config_save_rate < 20_000 else config_save_rate
+
+        self.__config_filepath = None
+        if config_filepath:
+            self.__init_config_file(config_filepath)
+            self.__config_filepath = config_filepath
+            logging.info(f'Config File set to: "{config_filepath}"')
+            config_data = self.__read_config_file(config_filepath)
+            if config_data.get('recreate_node_args'):
+                if 'scan_rate' in config_data['recreate_node_args'].keys():
+                    scan_rate = config_data['recreate_node_args']['scan_rate']
+                if 'config_save_rate' in config_data['recreate_node_args'].keys():
+                    config_save_rate = config_data['recreate_node_args']['config_save_rate']
+                # TODO fully implement
 
         self.__scan_rate = SparkplugMemoryTag(
             name='Node Control/Scan Rate',
@@ -353,12 +475,20 @@ class SparkplugEdgeNode:
         self.__bdseq = helpers.Incrementor()
         self.__seq = helpers.Incrementor(maximum=255)
 
-        self.__nbirth_payload = None
-        self.__ndeath_payload = None
-
         self.__mid_deque = deque(maxlen=10)
 
-        self.__on_client_callback = None
+        self.__config_save_rate = config_save_rate
+        self.__last_config_save = 0
+        
+
+        '''Callbacks for exposing mqtt client to external functions. all functions are called with the arguments (node=self, mqtt_client=client)'''
+        self.__callbacks = dict(
+            on_set_client=on_set_client if callable(on_set_client) else None,
+            on_mqtt_connect=on_mqtt_connect if callable(on_mqtt_connect) else None,
+            on_mqtt_publish=on_mqtt_publish if callable(on_mqtt_publish) else None,
+            on_mqtt_message=on_mqtt_message if callable(on_mqtt_message) else None,
+            on_mqtt_disconnect=on_mqtt_disconnect if callable(on_mqtt_disconnect) else None
+        )
 
         self.__last_read = 0
 
@@ -391,9 +521,10 @@ class SparkplugEdgeNode:
         self.__client.on_connect = self.__on_mqtt_connect
         self.__client.on_publish = self.__on_mqtt_publish
         self.__client.on_disconnect = self.__on_mqtt_disconnect
+        self.__client.on_message = self.__on_mqtt_messge
         self.__client.message_callback_add(self.__topics.NCMD, self.__on_ncmd_message)
-        if self.__on_client_callback:
-            self.__on_client_callback(self.__client)
+        if self.__callbacks['on_set_client']:
+            self.__callbacks['on_set_client'](node=self, mqtt_client=client)
     
     def __set_broker(self, idx: int):
         if self.__running:
@@ -404,11 +535,10 @@ class SparkplugEdgeNode:
     def start_client(self):
         if self.__running:
             self.__client.loop_stop()
-
-        self.make_bd_payloads()
         
         broker = self.current_broker
-        self.__client.will_set(topic=self.__topics.NDEATH, payload=self.__ndeath_payload, qos=1)
+
+        self.__client.will_set(topic=self.__topics.NDEATH, payload=self.__get_ndeath_payload(), qos=1)
 
         self.__client.connect_async(
             host=broker.host,
@@ -422,16 +552,63 @@ class SparkplugEdgeNode:
         self.__client.loop_stop()
         self.__running = False
 
-    def save_config(self):
+    def save_config(self) -> bool:
         '''
         Save config to file on ssd
         '''
+        filepath = self.__config_filepath
+        if not filepath:
+            logging.debug('Ignoring config save, no filepath set')
+            return False
 
-    @classmethod
-    def from_config_file(cls):
+        config = {
+            'bdSeq': self.__bdseq.current_value,
+            'recreate_node_args': {
+                'scan_rate': self.__scan_rate.current_value,
+                'config_save_rate': self.__config_save_rate
+            }
+        }
+
+        with open(filepath, 'w') as file:
+            json.dump(config, file, indent=4)
+
+        for metric in self.metrics:
+            if not isinstance(metric, SparkplugMemoryTag) or not metric.persistent:
+                continue
+            logging.debug(f'Saving tag "{metric.name}" to disk')
+            metric.save_to_disk()
+
+        self.__last_config_save = helpers.millis()
+        return True
+
+    @staticmethod
+    def __init_config_file(config_filepath: str):
+        if not config_filepath:
+            logging.warning('Cannot initialize config file, no config filepath set!')
+            return
+        
+        if os.path.isfile(config_filepath):
+            logging.info(f'Skipping config file initialize, config file "{config_filepath}" already exists!')
+            return
+        
+        directory_path = os.path.dirname(config_filepath)
+        os.makedirs(directory_path, exist_ok=True)
+        with open(config_filepath, 'w', newline='') as file:
+            json.dump({}, file)
+
+
+    @staticmethod
+    def __read_config_file(config_filepath: str) -> dict:
         '''
-        Load edge node data from ssd
+        Verify that config file exists before calling, otherwise will throw error
+        If file is not valid json will throw error
         '''
+        if not config_filepath or not os.path.isfile(config_filepath):
+            raise ValueError(f'Config file "{config_filepath}" does not exist!')
+
+        with open(config_filepath, 'r') as file:
+            return json.load(file)
+
 
     def read(self, rbe: bool = True) -> List[dict]:
         changed = []
@@ -449,6 +626,10 @@ class SparkplugEdgeNode:
         return changed
 
     @property
+    def metrics(self) -> List[SparkplugMetric]:
+        return self.__metrics
+
+    @property
     def last_read_delta(self) -> int:
         return helpers.millis() - self.__last_read
     
@@ -457,6 +638,16 @@ class SparkplugEdgeNode:
         if self.__scan_rate.current_value is None:
             return True
         return self.last_read_delta >= self.__scan_rate.current_value
+
+    @property
+    def last_config_save_delta(self) -> int:
+        return helpers.millis() - self.__last_config_save
+
+    @property
+    def config_save_due(self) -> bool:
+        if not self.__config_save_rate:
+            return False
+        return self.last_config_save_delta >= self.__config_save_rate
     
     def make_payload_from_metrics(self, metrics: List[dict]) -> bytes:
         payload_dict = {
@@ -467,11 +658,19 @@ class SparkplugEdgeNode:
         return ParseDict(payload_dict, sparkplug_pb2.Payload()).SerializeToString()
 
     def loop_forever(self):
+        if not self.__running:
+            logging.info('Starting Edge Node MQTT loop!')
+            self.start_client()
+        logging.info('MQTT started! Starting RBE loop')
         while True:
+            if not self.__client.is_connected:
+                return
             if self.read_due:
                 logging.debug('Tag Read Due!')
                 self._rbe()
-                
+            if self.config_save_due:
+                logging.debug('Config Save Due!')
+                self.save_config()
 
     def _rbe(self):
         metrics_to_publish = self.read()
@@ -486,20 +685,25 @@ class SparkplugEdgeNode:
     '''
     Sparkplug functions
     '''
-    def make_bd_payloads(self, rebirth: bool = False) -> bool:
+    def __get_ndeath_payload(self) -> bytes:
         millis = helpers.millis()
         self.__seq.reset()  # Remove this line for sparkplug 3.0.0
-        self.__ndeath_payload = ParseDict({
+        return ParseDict({
             'timestamp': millis,
             'metrics': [
                 {
                     'timestamp': millis,
                     'name': 'bdSeq',
                     'datatype': SparkplugDataTypes.UInt64.value,
-                    'long_value': self.__bdseq.current_value - 1 if rebirth else self.__bdseq.current_value
+                    'long_value': self.__bdseq.current_value
                 }
             ]
         }, sparkplug_pb2.Payload()).SerializeToString()
+        
+    
+    def __get_nbirth_payload(self, rebirth: bool = False) -> bool:
+        logging.debug(f'MAKING BIRTH PAYLOAD, bdSeq: {self.__bdseq.previous_value if rebirth else self.__bdseq.current_value}')
+        millis = helpers.millis()
 
         payload = {
             'timestamp': millis,
@@ -509,7 +713,7 @@ class SparkplugEdgeNode:
                     'timestamp': millis,
                     'name': 'bdSeq',
                     'datatype': SparkplugDataTypes.UInt64.value,
-                    'long_value': self.__bdseq.current_value - 1 if rebirth else self.__bdseq.current_value
+                    'long_value': self.__bdseq.previous_value if rebirth else self.__bdseq.current_value
                 },
                 {
                     'timestamp': millis,
@@ -519,42 +723,16 @@ class SparkplugEdgeNode:
                 }
             ]
         }
-        # TODO ADD METRICS TO PAYLOAD --> payload['metrics'].extend(self.__read_metrics_callback(rbe=True))
+        # add metrics to payload
         payload['metrics'].extend(self.read(rbe=False))
         
-        try:
-            self.__nbirth_payload = ParseDict(payload, sparkplug_pb2.Payload()).SerializeToString()
-        except (EncodeError, ParseError) as err:
-            logging.error(f'FAILED TO MAKE BIRTH PAYLOAD: {err}')
-            return False
+        return ParseDict(payload, sparkplug_pb2.Payload()).SerializeToString()
 
-        return True
 
     def __sparkplug_message_published(self):
-        logging.debug(f'SPARKPLUG MESSAGE PUBLISHED (seq: {self.__seq.current_value})')
+        logging.info(f'SPARKPLUG MESSAGE PUBLISHED (seq: {self.__seq.current_value})')
         self.__seq.next_value()
 
-    '''
-    MQTT paho-mqtt client functions
-    '''
-    def __mqtt_publish(self, client: mqtt_functions.mqtt.Client, topic: str, payload: str or bytes, qos: int = 0, retain: bool = False):
-        result = client.publish(topic=topic, payload=payload, qos=qos, retain=retain)
-        self.__mid_deque.append(result.mid)
-
-    def __on_mqtt_connect(self, client, userdata, flags, rc, reasonCode = None, properties = None):
-        logging.debug(f'self.on_connect() result: {mqtt_functions.ReturnCodes(rc).description}')
-        client.subscribe(self.__topics.NCMD)
-        self.__mqtt_publish(client, self.__topics.NBIRTH, self.__nbirth_payload)
-        logging.debug(f'published NBIRTH')
-        self.__bdseq.next_value()
-
-    def __on_mqtt_publish(self, client, userdata, mid):
-        logging.debug(f'MQTT MESSAGE PUBLISHED')
-        if mid is not None and mid in self.__mid_deque:
-            self.__sparkplug_message_published()
-
-    def __on_mqtt_disconnect(self, client, userdata, rc):
-        logging.error('MQTT DISCONNECTED')
 
     def __on_ncmd_message(self, client, userdata, message):
         if message.topic != self.__topics.NCMD:
@@ -585,7 +763,7 @@ class SparkplugEdgeNode:
                         if metric['name'] != metric_obj.name:
                             continue
                         if not metric_obj.writable:
-                            logging.warning(f'Cannot write NCMD to read only tag "{metric_obj.name}"')
+                            logging.warning(f'Ignoring NCMD: cannot write to read only tag "{metric_obj.name}"')
                             break
                         if metric_obj.value_key_camel_case in metric.keys():
                             new_value = metric[metric_obj.value_key_camel_case]
@@ -601,21 +779,60 @@ class SparkplugEdgeNode:
                         new_value = metric[value_key]
                         metric_obj.write(new_value)
                         trigger_publish = True
-
-                        logging.debug(f'NCMD, write metric: (key {metric_obj.value_key_camel_case})')
-                        logging.debug(str(metric))
+                        logging.info(f'NCMD, wrote "{new_value}" to metric "{metric_obj.name}"')
                         break
             
             if trigger_rebirth:
-                if self.make_bd_payloads(rebirth=True):
-                    self.__mqtt_publish(client=client, topic=self.__topics.NBIRTH, payload=self.__nbirth_payload)
-                    logging.debug('Rebirth Published!')
+                payload = self.__get_nbirth_payload(rebirth=True)
+                if payload:
+                    self.__mqtt_publish(client=client, topic=self.__topics.NBIRTH, payload=payload)
+                    logging.info('Rebirth Published!')
                 return
             if not trigger_publish:
                 return
             self._rbe()
         except (DecodeError, KeyError, ValueError) as err:
             logging.error(f'NCMD failed: {err}')
+
+    '''
+    MQTT paho-mqtt client functions
+    '''
+    def __mqtt_publish(self, client: mqtt_functions.mqtt.Client, topic: str, payload: str or bytes, qos: int = 0, retain: bool = False):
+        if not client.is_connected:
+            pass # TODO STORE AND FORWARD
+        result = client.publish(topic=topic, payload=payload, qos=qos, retain=retain)
+        self.__mid_deque.append(result.mid)
+
+    def __on_mqtt_connect(self, client, userdata, flags, rc, reasonCode = None, properties = None):
+        return_code = mqtt_functions.ReturnCodes(rc)
+        if rc != 0:
+            logging.error(f'MQTT Connect failed: {return_code.description}')
+            return
+        logging.info(f'MQTT Connection Success: {return_code.description}')
+        client.subscribe(self.__topics.NCMD)
+
+        self.__mqtt_publish(client, self.__topics.NBIRTH, self.__get_nbirth_payload(rebirth=False))
+        logging.debug(f'PUBLISHED NBIRTH')
+        self.__bdseq.next_value()
+        if self.__callbacks['on_mqtt_connect']:
+            self.__callbacks['on_mqtt_connect'](node=self, mqtt_client=client)
+
+    def __on_mqtt_publish(self, client, userdata, mid):
+        logging.debug(f'MQTT MESSAGE PUBLISHED')
+        if mid is not None and mid in self.__mid_deque:
+            self.__sparkplug_message_published()
+        if self.__callbacks['on_mqtt_publish']:
+            self.__callbacks['on_mqtt_publish'](node=self, mqtt_client=client)
+
+    def __on_mqtt_messge(self, client, userdata, msg):
+        logging.debug('-----< MQTT MESSAGE RECEIVED >-----')
+
+    def __on_mqtt_disconnect(self, client, userdata, rc):
+        logging.error('MQTT DISCONNECTED')
+        if self.__callbacks['on_mqtt_disconnect']:
+            self.__callbacks['on_mqtt_disconnect'](node=self, mqtt_client=client)
+
+    
     
 
 class SparkplugDevice:

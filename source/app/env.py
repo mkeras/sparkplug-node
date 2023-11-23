@@ -15,3 +15,9 @@ MQTT_USE_TLS = environ.get('MQTT_USE_TLS', default='True') in __true
 
 SPARKPLUG_GROUP_ID = environ.get('SPARKPLUG_GROUP_ID')
 SPARKPLUG_EDGE_NODE_ID = environ.get('SPARKPLUG_EDGE_NODE_ID')
+
+DATA_DIRECTORY = environ.get('DATA_DIRECTORY', default=f'/etc/sparkplug/{SPARKPLUG_GROUP_ID}/{SPARKPLUG_EDGE_NODE_ID}/').replace(' ', '_')
+
+CONFIG_FILEPATH = environ.get('CONFIG_FILEPATH', default=f'{DATA_DIRECTORY}config.json')
+
+MEMORY_TAGS_FILEPATH = environ.get('MEMORY_TAGS_FILEPATH', default=f'{DATA_DIRECTORY}memory-tags.json')

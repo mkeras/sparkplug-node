@@ -5,23 +5,39 @@ import logging
 logging.basicConfig(level=logging.DEBUG)
 debug = logging.debug
 
-from random import randint
-def reader(prev_value) -> int:
-    return randint(4354534, 4534564445)
+def on_set_client(node: sparkplug.SparkplugEdgeNode, mqtt_client: mqtt_functions.mqtt.Client):
+    logging.debug('on_set_client CALLBACK')
+
+def on_mqtt_connect(node: sparkplug.SparkplugEdgeNode, mqtt_client: mqtt_functions.mqtt.Client):
+    logging.debug('on_mqtt_connect CALLBACK')
+
 
 def start():
-    test_tag = sparkplug.SparkplugMetric(
-        name='testing/Memory Tag Test',
-        datatype=sparkplug.SparkplugDataTypes.Int64,
-        read_function=reader,
-        disable_alias=True
-    )
-    #test_tag.read()
     string_tag = sparkplug.SparkplugMemoryTag(
-        name='testing/String Tag 1',
+        name='demo/String Tag 1',
         datatype=sparkplug.SparkplugDataTypes.String,
+        initial_value='This is a writable string tag',
         writable=True,
-        disable_alias=True
+        disable_alias=True,
+        persistence_file=env.MEMORY_TAGS_FILEPATH
+    )
+
+    int_tag = sparkplug.SparkplugMemoryTag(
+        name='demo/Integer Tag 1',
+        datatype=sparkplug.SparkplugDataTypes.Int64,
+        initial_value=2341,
+        writable=True,
+        disable_alias=True,
+        persistence_file=env.MEMORY_TAGS_FILEPATH
+    )
+
+    float_tag = sparkplug.SparkplugMemoryTag(
+        name='demo/Float Tag 1',
+        datatype=sparkplug.SparkplugDataTypes.Float,
+        initial_value=3.1415,
+        writable=True,
+        disable_alias=True,
+        persistence_file=env.MEMORY_TAGS_FILEPATH
     )
 
     brokers = [
@@ -35,14 +51,17 @@ def start():
             name='Primary Broker 1'
         )
     ]
+
     edge_node = sparkplug.SparkplugEdgeNode(
         group_id=env.SPARKPLUG_GROUP_ID,
         edge_node_id=env.SPARKPLUG_EDGE_NODE_ID,
         brokers=brokers,
-        metrics=[test_tag, string_tag],
-        scan_rate=5000
+        metrics=[string_tag, int_tag, float_tag],
+        scan_rate=5000,
+        on_set_client=on_set_client,
+        on_mqtt_connect=on_mqtt_connect,
+        config_filepath=env.CONFIG_FILEPATH,
+        config_save_rate=20000
     )
-    debug('Starting Edge Node!')
-    edge_node.start_client()
-    debug('Edge Node started!')
+    
     edge_node.loop_forever()
