@@ -294,7 +294,9 @@ class SparkplugMemoryTag(SparkplugMetric):
         alias: int = None,
         disable_alias: bool = False,
         rbe_ignore: bool = False,
-        persistence_file: Optional[str] = None
+        persistence_file: Optional[str] = None,
+        on_write = None,
+        on_read = None
     ) -> None:
         self.__mem_value = initial_value
         self.__persistence_file = persistence_file
@@ -306,7 +308,9 @@ class SparkplugMemoryTag(SparkplugMetric):
             write_function=self.__mem_writer if writable else None,
             alias=alias,
             disable_alias=disable_alias,
-            rbe_ignore=rbe_ignore
+            rbe_ignore=rbe_ignore,
+            on_write=on_write,
+            on_read=on_read
         )
         
         if persistence_file:  # Get value from storage

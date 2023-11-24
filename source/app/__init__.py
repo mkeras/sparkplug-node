@@ -2,7 +2,10 @@ from app import env
 from app import sparkplug, mqtt_functions
 import logging
 
-logging.basicConfig(level=logging.DEBUG)
+if env.DEBUG:
+    logging.basicConfig(level=logging.DEBUG)
+else:
+    logging.basicConfig(level=logging.INFO)
 debug = logging.debug
 
 def on_set_client(node: sparkplug.SparkplugEdgeNode, mqtt_client: mqtt_functions.mqtt.Client):
