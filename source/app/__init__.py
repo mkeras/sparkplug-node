@@ -1,21 +1,21 @@
-from app import env
-from app import sparkplug, mqtt_functions
-import logging
-
-if env.DEBUG:
-    logging.basicConfig(level=logging.DEBUG)
-else:
-    logging.basicConfig(level=logging.INFO)
-debug = logging.debug
-
-def on_set_client(node: sparkplug.SparkplugEdgeNode, mqtt_client: mqtt_functions.mqtt.Client):
-    logging.debug('on_set_client CALLBACK')
-
-def on_mqtt_connect(node: sparkplug.SparkplugEdgeNode, mqtt_client: mqtt_functions.mqtt.Client):
-    logging.debug('on_mqtt_connect CALLBACK')
-
 
 def start():
+    from app import env
+    from app import sparkplug, mqtt_functions
+    import logging
+
+    if env.DEBUG:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
+
+
+    def on_set_client(node: sparkplug.SparkplugEdgeNode, mqtt_client: mqtt_functions.mqtt.Client):
+        logging.debug('on_set_client CALLBACK')
+
+    def on_mqtt_connect(node: sparkplug.SparkplugEdgeNode, mqtt_client: mqtt_functions.mqtt.Client):
+        logging.debug('on_mqtt_connect CALLBACK')
+
     string_tag = sparkplug.SparkplugMemoryTag(
         name='demo/String Tag 1',
         datatype=sparkplug.SparkplugDataTypes.String,
