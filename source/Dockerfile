@@ -12,4 +12,4 @@ COPY ./app /sparkplug-node/app/
 COPY ./run.py /sparkplug-node/
 
 # Run run.py when the container launches
-CMD ["python", "run.py"]
+CMD ["python", "-m", "app"]
