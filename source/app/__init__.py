@@ -1,8 +1,16 @@
+from app import env
+import logging
+
+if env.DEBUG:
+    logging.basicConfig(level=logging.DEBUG)
+else:
+    logging.basicConfig(level=logging.INFO)
+
+logger = logging.getLogger()
 
 def start():
     from app import env
     from app import sparkplug, mqtt_functions
-    import logging
 
     if env.DEBUG:
         logging.basicConfig(level=logging.DEBUG)
