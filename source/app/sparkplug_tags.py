@@ -291,11 +291,17 @@ class SparkplugMemoryTag(SparkplugMetric):
         disable_alias: bool = False,
         rbe_ignore: bool = False,
         persistence_file: Optional[str] = None,
-        on_write = None,
-        on_read = None
+        on_write: Optional[Callable] = None,
+        on_read: Optional[Callable] = None,
+        write_validator: Optional[Callable] = None
     ) -> None:
+        """
+        write_validator function signature write_validator(current_value, new_value) -> bool
+        returns False if new_value is invalid, True if it is
+        """
         self.__mem_value = initial_value
         self.__persistence_file = persistence_file
+        self.__write_validator = write_validator if callable(write_validator) else None
 
         init_args = dict(
             name=name,
@@ -362,6 +368,8 @@ class SparkplugMemoryTag(SparkplugMetric):
         return self.__mem_value
 
     def __mem_writer(self, value) -> bool:
+        if self.__write_validator is not None and not self.__write_validator(self.current_value, value):
+            return False
         self.__mem_value = value
         return True
 

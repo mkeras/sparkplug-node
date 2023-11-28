@@ -410,9 +410,12 @@ class SparkplugEdgeNode:
                                 break
 
                         new_value = metric[value_key]
-                        metric_obj.write(new_value)
-                        trigger_publish = True
-                        logging.info(f'NCMD, wrote "{new_value}" to metric "{metric_obj.name}"')
+                        if metric_obj.write(new_value):
+                            trigger_publish = True
+                            logging.info(f'NCMD, wrote "{new_value}" to metric "{metric_obj.name}"')
+                        else:
+                            logging.error(f'Failed to write value "{new_value}" to metric "{metric_obj.name}"')
+                            trigger_rebirth = True  # Trigger rebirth so app that sent NCMD will know value hasn't changed
                         break
             
             if trigger_rebirth:
