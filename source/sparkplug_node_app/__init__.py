@@ -1,4 +1,4 @@
-from app import env
+from sparkplug_node_app import env
 import logging
 
 if env.DEBUG:

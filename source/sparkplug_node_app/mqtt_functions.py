@@ -1,4 +1,4 @@
-from app import env
+from sparkplug_node_app import env
 import paho.mqtt.client as mqtt
 
 from dataclasses import dataclass

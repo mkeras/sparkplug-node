@@ -1,12 +1,12 @@
-from app.protobuf_files import sparkplug_pb2
-from app import config, mqtt_functions
-from app.sparkplug_tags import SparkplugDataTypes, SparkplugMetric, SparkplugMemoryTag
+from sparkplug_node_app.protobuf_files import sparkplug_pb2
+from sparkplug_node_app import config, mqtt_functions
+from sparkplug_node_app.sparkplug_tags import SparkplugDataTypes, SparkplugMetric, SparkplugMemoryTag
 from google.protobuf.json_format import MessageToJson, MessageToDict, Parse, ParseDict, ParseError
 from google.protobuf.message import DecodeError, EncodeError
 from typing import List, Callable, Optional
 from enum import Enum
 import logging
-from app import helpers
+from sparkplug_node_app import helpers
 from collections import deque
 import time
 import uuid

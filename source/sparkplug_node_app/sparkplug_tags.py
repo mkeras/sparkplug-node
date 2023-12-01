@@ -1,4 +1,4 @@
-from app import helpers
+from sparkplug_node_app import helpers
 from enum import Enum
 import os
 import logging

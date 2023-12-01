@@ -1,4 +1,4 @@
-from app import start
+from sparkplug_node_app import start
 
 
 if __name__ == '__main__':
