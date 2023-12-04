@@ -367,6 +367,13 @@ class SparkplugMemoryTag(SparkplugMetric):
     def __mem_reader(self, prev_value):
         return self.__mem_value
 
+    def force_set_value(self, value):
+        """
+        forces value onto tag, used for changing the value of a memory tag that is not writable
+        TODO remote_writable vs writeble 
+        """
+        self.__mem_value = value
+
     def __mem_writer(self, value) -> bool:
         if self.__write_validator is not None and not self.__write_validator(self.current_value, value):
             return False
