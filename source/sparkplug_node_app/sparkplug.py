@@ -76,6 +76,7 @@ class SparkplugEdgeNode:
         self.__brokers = brokers
         self.__metrics = metrics
         self.__running = False
+        self.__force_rbe = False
 
         scan_rate = 1000 if not scan_rate or scan_rate > 3_600_000 or scan_rate < 500 else scan_rate
         config_save_rate = 600_000 if not config_save_rate or config_save_rate > 36_000_000 or config_save_rate < 20_000 else config_save_rate
@@ -300,6 +301,10 @@ class SparkplugEdgeNode:
             if self.read_due:
                 logging.debug('Tag Read Due!')
                 self._rbe()
+            elif self.__force_rbe:
+                logging.debug('RBE Forced!')
+                self.__force_rbe = False
+                self._rbe()
             if self.config_save_due:
                 logging.debug('Config Save Due!')
                 self.save_config()
@@ -313,6 +318,9 @@ class SparkplugEdgeNode:
                 topic=self.__topics.NDATA,
                 payload=self.make_payload_from_metrics(metrics_to_publish)
             )
+
+    def force_rbe(self):
+        self.__force_rbe = True
 
     '''
     Sparkplug functions
